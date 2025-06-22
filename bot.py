@@ -15,26 +15,33 @@ from discord.ext import commands
 sdrProcess = None
 
 class PCMAudioPlayer(discord.AudioSource):
-    def __init__(self, device, audio) -> None:
+    def __init__(self) -> None:
         super().__init__()
 
-        self.ratio = 48000 / device["defaultSampleRate"]
-        self.channels = device["maxInputChannels"]
-        self.chunk = int(device["defaultSampleRate"] * 0.02)
-        self.stream = audio.open(
+        logger.info("Starting PCMAudioPlayer.")
+
+        self.audio  = pyaudio.PyAudio()
+        self.device = self.audio.get_device_info_by_index(1)
+
+        logger.info(f"Audio device: {self.device}")
+
+        self.channels = self.device["maxInputChannels"]
+        self.chunk    = int(self.device["defaultSampleRate"] * 0.02)
+        self.ratio    = 48000 / self.device["defaultSampleRate"]
+        self.stream   = self.audio.open(
             format             = pyaudio.paInt16,
             channels           = self.channels,
-            rate               = int(device["defaultSampleRate"]),
+            rate               = 8000,
             input              = True,
-            input_device_index = device["index"],
+            input_device_index = self.device["index"],
             frames_per_buffer  = self.chunk,
         )
 
         if self.ratio != 1:
-            logger.info("using samplerate")
+            logger.info("using resampler")
             self.resampler = samplerate.Resampler("sinc_best", channels=2)
         else:
-            logger.info("NOT using samplerate")
+            logger.info("NOT using resampler")
             self.resampler = None
 
     def read(self) -> bytes:
@@ -52,11 +59,11 @@ class PCMAudioPlayer(discord.AudioSource):
 
         return frame.tobytes()
 
-    def __del__(self):
-        logger.info("destroying PCMAudioPlayer")
-        self.stream.close()
+    # def __del__(self):
+    #     logger.info("destroying PCMAudioPlayer")
+    #     self.stream.close()
 
-def createBot(commandPrefix, device, audio) -> commands.Bot:
+def createBot(commandPrefix) -> commands.Bot:
     intents = discord.Intents.default()
     intents.message_content = True
 
@@ -74,14 +81,14 @@ def createBot(commandPrefix, device, audio) -> commands.Bot:
 
         logger.info("Shutting down sdrSubProcess...")
         sdrProcess.kill()
-        outs, errs = sdrProcess.communicate()
+        outs, errs = await sdrProcess.communicate()
 
     async def shutdown(ctx = None):
         await killSDRProcess()
 
         if ctx is not None:
             await ctx.voice_client.disconnect()
-            await ct.xbot.logout()
+            await ctx.bot.logout()
 
         exit()
 
@@ -113,7 +120,7 @@ def createBot(commandPrefix, device, audio) -> commands.Bot:
         if sdrProcess is not None:
             killSDRProcess()
 
-        await ctx.send(f"Starting OP25 for OKWIN...")
+        message = await ctx.send(f":clock12: Starting OP25 for OKWIN...")
 
         sdrProcess = await asyncio.create_subprocess_exec(
             "/home/sdr/op25/op25/gr-op25_repeater/apps/rx.py",
@@ -137,7 +144,7 @@ def createBot(commandPrefix, device, audio) -> commands.Bot:
             cwd = "/home/sdr/op25/op25/gr-op25_repeater/apps/"
         )
 
-        await ctx.send(f"Waiting for NAC...")
+        await message.edit(content = ":clock1: Waiting for NAC...")
 
         while sdrProcess.returncode is None:
             line = await sdrProcess.stdout.readline()
@@ -149,12 +156,21 @@ def createBot(commandPrefix, device, audio) -> commands.Bot:
             logger.info(line)
 
             if line.find("Reconfiguring NAC") != -1:
-                await ctx.send("NAC acquired, beginning streaming...")
+                await message.edit(content = ":clock2: NAC acquired, starting stream...")
                 break
 
-        ctx.voice_client.play(PCMAudioPlayer(device, audio), after=lambda e: print(f'Player error: {e}') if e else None)
+        try:
+            audioPlayer = PCMAudioPlayer()
+        except Exception as e:
+            logger.error(f"Failed to start PCMAudioPlayer: {e}")
 
-        await ctx.send(f"Streaming OKWIN.")
+            await ctx.voice_client.disconnect()
+            await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
+            return
+
+        ctx.voice_client.play(audioPlayer, after=lambda e: print(f'Player error: {e}') if e else None)
+
+        await message.edit(content = ":white_check_mark: Streaming OKWIN.")
 
         await bot.change_presence(activity = 
             discord.Streaming(
@@ -194,11 +210,5 @@ if __name__ == "__main__":
         input("Press Enter to exit")
         sys.exit(1)
 
-    p = pyaudio.PyAudio()
-
-    deviceInfo = p.get_device_info_by_index(1)
-
-    logger.info(f'chosen device: {deviceInfo["name"]}, samplerate: {deviceInfo["defaultSampleRate"]}, Channels: {deviceInfo["maxInputChannels"]}')
-
     # start bot
-    createBot("!", deviceInfo, p).run(token)
+    createBot("!").run(token)
