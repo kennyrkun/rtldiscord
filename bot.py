@@ -1,6 +1,6 @@
 import sys
 import discord
-import samplerate
+import samplerate as sampleRateLib
 import pyaudio
 import numpy as np
 import subprocess
@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 
 from discord.ext import commands
 
-sdrProcess = None
+subprocesses = []
 
 class PCMAudioPlayer(discord.AudioSource):
-    def __init__(self) -> None:
+    def __init__(self, sampleRate = None) -> None:
         super().__init__()
 
         logger.info("Starting PCMAudioPlayer.")
@@ -25,13 +25,16 @@ class PCMAudioPlayer(discord.AudioSource):
 
         logger.info(f"Audio device: {self.device}")
 
+        if sampleRate is None:
+            sampleRate = self.device["defaultSampleRate"]
+
         self.channels = self.device["maxInputChannels"]
-        self.chunk    = int(self.device["defaultSampleRate"] * 0.02)
-        self.ratio    = 48000 / self.device["defaultSampleRate"]
+        self.chunk    = int(sampleRate * 0.02)
+        self.ratio    = 48000 / sampleRate
         self.stream   = self.audio.open(
             format             = pyaudio.paInt16,
             channels           = self.channels,
-            rate               = 8000,
+            rate               = sampleRate,
             input              = True,
             input_device_index = self.device["index"],
             frames_per_buffer  = self.chunk,
@@ -39,7 +42,7 @@ class PCMAudioPlayer(discord.AudioSource):
 
         if self.ratio != 1:
             logger.info("using resampler")
-            self.resampler = samplerate.Resampler("sinc_best", channels=2)
+            self.resampler = sampleRateLib.Resampler("sinc_best", channels=2)
         else:
             logger.info("NOT using resampler")
             self.resampler = None
@@ -59,9 +62,9 @@ class PCMAudioPlayer(discord.AudioSource):
 
         return frame.tobytes()
 
-    # def __del__(self):
-    #     logger.info("destroying PCMAudioPlayer")
-    #     self.stream.close()
+    def __del__(self):
+        logger.info("destroying PCMAudioPlayer")
+        self.stream.close()
 
 def createBot(commandPrefix) -> commands.Bot:
     intents = discord.Intents.default()
@@ -73,24 +76,20 @@ def createBot(commandPrefix) -> commands.Bot:
         intents = intents
     )
 
-    async def killSDRProcess():
-        global sdrProcess
+    async def killSubprocesses():
+        global subprocesses
 
-        if sdrProcess is None:
+        if len(subprocesses) == 0:
+            logger.info("No subprocesses to shutdown")
             return
 
-        logger.info("Shutting down sdrSubProcess...")
-        sdrProcess.kill()
-        outs, errs = await sdrProcess.communicate()
+        logger.info("Shutting down subprocesses...")
 
-    async def shutdown(ctx = None):
-        await killSDRProcess()
-
-        if ctx is not None:
-            await ctx.voice_client.disconnect()
-            await ctx.bot.logout()
-
-        exit()
+        for process in subprocesses:
+            process.kill()
+            await process.communicate()
+        
+        logger.info("All subprocesses shutdown.")
 
     @bot.event
     async def on_ready():
@@ -104,27 +103,12 @@ def createBot(commandPrefix) -> commands.Bot:
             )
         )
 
-    @bot.command(name="play", help="Play audio")
-    async def play(ctx):
-        if ctx.author.voice is None:
-            await ctx.send("You must be connected a voice channel.")
-            raise commands.CommandError("Author not connected to a voice channel.")
-
-        if ctx.voice_client is not None and ctx.voice_client.is_playing():
-            ctx.voice_client.stop()
-
-        await ctx.author.voice.channel.connect()
-
-        global sdrProcess
-
-        if sdrProcess is not None:
-            killSDRProcess()
-
-        message = await ctx.send(f":clock12: Starting OP25 for OKWIN...")
+    async def startOP25(ctx, config):
+        message = await ctx.send(f":clock12: Starting OP25 for {config}...")
 
         sdrProcess = await asyncio.create_subprocess_exec(
             "/home/sdr/op25/op25/gr-op25_repeater/apps/rx.py",
-                "--trunk-conf-file", "okwin.tsv",
+                "--trunk-conf-file", f"{config}.tsv",
                 "--freq-error-tracking",
                 "--nocrypt",
                 "--vocoder",
@@ -144,7 +128,9 @@ def createBot(commandPrefix) -> commands.Bot:
             cwd = "/home/sdr/op25/op25/gr-op25_repeater/apps/"
         )
 
-        await message.edit(content = ":clock1: Waiting for NAC...")
+        subprocesses.append(sdrProcess)
+
+        await message.edit(content = ":clock1: Waiting for ALSA...")
 
         while sdrProcess.returncode is None:
             line = await sdrProcess.stdout.readline()
@@ -155,16 +141,74 @@ def createBot(commandPrefix) -> commands.Bot:
             line = line.decode()
             logger.info(line)
 
-            if line.find("Reconfiguring NAC") != -1:
-                await message.edit(content = ":clock2: NAC acquired, starting stream...")
+            if line.find("using ALSA sound system") != -1:
+                await message.edit(content = ":clock2: ALSA is ready, starting stream...")
                 break
+            elif line.find("Traceback (most recent call last):") != -1:
+                await message.edit(content = ":broken_heart: OP25 encountered a fatal error.")
+                await disconnect(ctx.voice_client)
+                await killSubprocesses()
+                return
 
         try:
-            audioPlayer = PCMAudioPlayer()
+            audioPlayer = PCMAudioPlayer(8000)
         except Exception as e:
             logger.error(f"Failed to start PCMAudioPlayer: {e}")
 
-            await ctx.voice_client.disconnect()
+            await disconnect(ctx.voice_client)
+            await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
+            return
+
+        ctx.voice_client.play(audioPlayer, after=lambda e: print(f'Player error: {e}') if e else None)
+
+        await message.edit(content = f":white_check_mark: Streaming {config}.")
+
+        await bot.change_presence(activity = 
+            discord.Streaming(
+                name = config,
+                url = "https://github.com/boatbod/op25"
+            )
+        )
+
+    async def startRTLFM(ctx, freq):
+        message = await ctx.send(f":clock12: Starting RTLFM...")
+
+        sdrProcess = await asyncio.create_subprocess_exec(
+            "rtl_fm",
+                "-f", "467612500",
+                "-s", "44100",
+                "-g", "9",
+                "-l", "10",
+                "-",
+            stdout = asyncio.subprocess.PIPE,
+            stderr = asyncio.subprocess.STDOUT
+        )
+
+        aplayProcess = await asyncio.create_subprocess_exec(
+            "aplay",
+                "-t", "raw",
+                "-r", "44100",
+                "-c", "1",
+                "-f", "S16_LE",
+                "-D", "hw:2,1",
+            stdout = asyncio.subprocess.PIPE,
+            stderr = asyncio.subprocess.STDOUT,
+            stdin  = asyncio.subprocess.PIPE
+        )
+
+        subprocesses.append(sdrProcess)
+        subprocesses.append(aplayProcess)
+
+        while sdrProcess.returncode is None:
+            line = await sdrProcess.stdout.read(1024)
+            program.stdin.write(line)
+
+        try:
+            audioPlayer = PCMAudioPlayer(44100)
+        except Exception as e:
+            logger.error(f"Failed to start PCMAudioPlayer: {e}")
+
+            await disconnect(ctx.voice_client)
             await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
             return
 
@@ -179,21 +223,50 @@ def createBot(commandPrefix) -> commands.Bot:
             )
         )
 
+    @bot.command(name="play", help="Play audio")
+    async def play(ctx, *args):
+        logger.info("play command")
+
+        if ctx.author.voice is None:
+            await ctx.send("You must be connected a voice channel.")
+            raise commands.CommandError("Author not connected to a voice channel.")
+
+        if ctx.voice_client is not None:
+            await disconnect(ctx.voice_client)
+
+        await ctx.author.voice.channel.connect()
+
+        logger.info(f"connected with args {args}")
+
+        await killSubprocesses()
+
+        await startOP25(ctx, "okwin")
+
     # @play.on_command_error
     # async def playFail(ctx):
     #     await ctx.send("Play what? `okwin` or `cps`")
 
     @bot.command(name="stop", help="Disconnect bot")
     async def stop(ctx):
-        await shutdown(ctx)
+        await disconnect(ctx.voice_client)
 
     @bot.event
     async def on_voice_state_update(member, before, after):
         if before.channel is None:
             return
 
+        if member.id == bot.user.id:
+            return
+
+        # leave the channel if it becomes empty
         if len(before.channel.members) - 1 < 1:
-            await shutdown()
+            for client in bot.voice_clients:
+                if client.channel.id == before.channel.id:
+                    await disconnect(client)
+
+    async disconnect(client)
+        await client.disconnect()
+        await killSubprocesses()    
 
     return bot
 
