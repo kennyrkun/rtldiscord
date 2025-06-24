@@ -14,6 +14,7 @@ from discord.ext import commands
 
 subprocesses = []
 
+# I tried using discord.PCMAudio, but it doesn't work because PCMAudio expects 48khz but P25 only provides 8khz
 class PCMAudioPlayer(discord.AudioSource):
     def __init__(self) -> None:
         logger.info("Starting PCMAudioPlayer.")
@@ -37,7 +38,7 @@ class PCMAudioPlayer(discord.AudioSource):
 
         if self.ratio != 1:
             logger.info("using resampler")
-            self.resampler = sampleRateLib.Resampler("sinc_best", channels=2)
+            self.resampler = sampleRateLib.Resampler("sinc_best", channels = 2)
         else:
             logger.info("NOT using resampler")
             self.resampler = None
@@ -46,7 +47,7 @@ class PCMAudioPlayer(discord.AudioSource):
 
     def read(self) -> bytes:
         frame = self.stream.read(self.chunk, exception_on_overflow=False)
-        frame = np.frombuffer(frame, dtype=np.int16)
+        frame = np.frombuffer(frame, dtype = np.int16)
 
         frame = frame * (80 / 100)
 
@@ -54,11 +55,12 @@ class PCMAudioPlayer(discord.AudioSource):
             frame = np.repeat(frame, 2)
 
         if self.resampler:
+            # this is probably converting the 8khz audio into 48khz
             frame = np.stack((frame[::2], frame[1::2]) , axis=1)
             return self.resampler.process(frame, self.ratio).astype(np.int16).tobytes()
 
         return frame.tobytes()
-        
+
     def __del__(self):
         logger.info("destroying PCMAudioPlayer")
         self.stream.close()
@@ -246,15 +248,30 @@ def createBot(commandPrefix) -> commands.Bot:
 
         await killSubprocesses()
 
-        await startOP25(ctx, "okwin")
+        if len(args) == 1:
+            if args[0] == "okwin":
+                await startOP25(ctx, "okwin")
+                return
+            elif args[0] == "okc":
+                raise commands.CommandError(f"OKC system is not supported.")
 
-    # @play.on_command_error
-    # async def playFail(ctx):
-    #     await ctx.send("Play what? `okwin` or `cps`")
+        raise commands.CommandError(f"Invalid arguments.")
+
+    @bot.event
+    async def on_command_error(ctx, error):
+        await disconnect(ctx.voice_client)
+        await ctx.send(f"💔 {error}")
+        logger.info(f"Error in command: {error}")
 
     @bot.command(name="stop", help="Disconnect bot")
     async def stop(ctx):
-        await ctx.message.add_reaction("wave")
+        if ctx.voice_client is None:
+            await ctx.message.add_reaction("🧐")
+            return
+
+        logger.info(f"{ctx.voice_client}")
+
+        await ctx.message.add_reaction("👋")
         await disconnect(ctx.voice_client)
 
     @bot.event
