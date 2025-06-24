@@ -13,6 +13,7 @@ logger      = logging.getLogger(__name__)
 from discord.ext import commands
 
 subprocesses = []
+tasks = set()
 
 # I tried using discord.PCMAudio, but it doesn't work because PCMAudio expects 48khz but P25 only provides 8khz
 class PCMAudioPlayer(discord.AudioSource):
@@ -79,7 +80,7 @@ def createBot(commandPrefix) -> commands.Bot:
         global subprocesses
 
         if len(subprocesses) == 0:
-            logger.info("No subprocesses to shutdown")
+            logger.info("No subprocesses to shutdown.")
             return
 
         logger.info(f"Shutting down {len(subprocesses)} subprocesses...")
@@ -94,6 +95,23 @@ def createBot(commandPrefix) -> commands.Bot:
         subprocesses.clear()
         
         logger.info("All subprocesses shutdown.")
+
+        logger.info("Canceling running tasks...")
+
+        if len(tasks) == 0:
+            logger.info("No tasks to cancel.")
+            return
+
+        logger.info(f"Shutting down {len(tasks)} tasks...")
+
+        for task in tasks:
+            try:
+                task.cancel()
+            except Exception as e:
+                logger.info(f"Skipping task cancel because an exception was raised: {e}")
+                pass
+
+        tasks.clear()
 
     @bot.event
     async def on_ready():
@@ -147,6 +165,7 @@ def createBot(commandPrefix) -> commands.Bot:
 
             if line.find("using ALSA sound system") != -1:
                 await message.edit(content = ":clock2: ALSA is ready, starting stream...")
+                await asyncio.sleep(3)
                 break
             elif line.find("Traceback (most recent call last):") != -1:
                 await message.edit(content = ":broken_heart: OP25 encountered a fatal error.")
@@ -173,6 +192,16 @@ def createBot(commandPrefix) -> commands.Bot:
                 url = "https://github.com/boatbod/op25"
             )
         )
+
+    async def runRTLFM(sdrProcess, aplayProcess):
+        logger.info("Starting RTLFM loop.")
+
+        # loop should automatically exit when the tasks are killed?
+        while sdrProcess.returncode is None and aplayProcess.returncode is None:
+            line = await sdrProcess.stdout.read(1024)
+            aplayProcess.stdin.write(line)
+
+        logger.info("Ended RTLFM loop.")
 
     async def startRTLFM(ctx, freq):
         message = await ctx.send(f":clock12: Starting RTLFM...")
@@ -203,9 +232,7 @@ def createBot(commandPrefix) -> commands.Bot:
         subprocesses.append(sdrProcess)
         subprocesses.append(aplayProcess)
 
-        while sdrProcess.returncode is None:
-            line = await sdrProcess.stdout.read(1024)
-            program.stdin.write(line)
+        asyncio.create_task(runRTLFM(sdrProcess, aplayProcess))
 
         try:
             audioPlayer = PCMAudioPlayer()
@@ -218,12 +245,12 @@ def createBot(commandPrefix) -> commands.Bot:
 
         ctx.voice_client.play(audioPlayer, after = lambda e: logger.error(f'Player error: {e}') if e else None)
 
-        await message.edit(content = ":white_check_mark: Streaming OKWIN.")
+        await message.edit(content = f":white_check_mark: Streaming FM {freq}.")
 
         await bot.change_presence(activity = 
             discord.Streaming(
-                name = "OKWIN",
-                url = "https://github.com/boatbod/op25"
+                name = freq,
+                url = "https://manpages.ubuntu.com/manpages/trusty/man1/rtl_fm.1.html"
             )
         )
 
@@ -253,15 +280,21 @@ def createBot(commandPrefix) -> commands.Bot:
                 await startOP25(ctx, "okwin")
                 return
             elif args[0] == "okc":
-                raise commands.CommandError(f"OKC system is not supported.")
+                raise commands.CommandError("OKC system is not supported.")
+            if args[0].isdigit():
+                if len(args[0]) != 9:
+                    raise commands.CommandError("Frequency is out of range.")
 
-        raise commands.CommandError(f"Invalid arguments.")
+                await startRTLFM(ctx, args[0])
+                return
+
+        raise commands.CommandError("Invalid arguments.")
 
     @bot.event
     async def on_command_error(ctx, error):
         await disconnect(ctx.voice_client)
         await ctx.send(f"💔 {error}")
-        logger.info(f"Error in command: {error}")
+        logger.error(f"Error in command: {error}")
 
     @bot.command(name="stop", help="Disconnect bot")
     async def stop(ctx):
