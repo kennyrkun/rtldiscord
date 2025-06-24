@@ -8,16 +8,14 @@ import asyncio
 import logging
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger      = logging.getLogger(__name__)
 
 from discord.ext import commands
 
 subprocesses = []
 
 class PCMAudioPlayer(discord.AudioSource):
-    def __init__(self, sampleRate = None) -> None:
-        super().__init__()
-
+    def __init__(self) -> None:
         logger.info("Starting PCMAudioPlayer.")
 
         self.audio  = pyaudio.PyAudio()
@@ -25,16 +23,13 @@ class PCMAudioPlayer(discord.AudioSource):
 
         logger.info(f"Audio device: {self.device}")
 
-        if sampleRate is None:
-            sampleRate = self.device["defaultSampleRate"]
-
         self.channels = self.device["maxInputChannels"]
-        self.chunk    = int(sampleRate * 0.02)
-        self.ratio    = 48000 / sampleRate
+        self.chunk    = int(self.device["defaultSampleRate"] * 0.02)
+        self.ratio    = 48000 / self.device["defaultSampleRate"]
         self.stream   = self.audio.open(
             format             = pyaudio.paInt16,
             channels           = self.channels,
-            rate               = sampleRate,
+            rate               = int(self.device["defaultSampleRate"]),
             input              = True,
             input_device_index = self.device["index"],
             frames_per_buffer  = self.chunk,
@@ -46,6 +41,8 @@ class PCMAudioPlayer(discord.AudioSource):
         else:
             logger.info("NOT using resampler")
             self.resampler = None
+
+        super().__init__()
 
     def read(self) -> bytes:
         frame = self.stream.read(self.chunk, exception_on_overflow=False)
@@ -61,7 +58,7 @@ class PCMAudioPlayer(discord.AudioSource):
             return self.resampler.process(frame, self.ratio).astype(np.int16).tobytes()
 
         return frame.tobytes()
-
+        
     def __del__(self):
         logger.info("destroying PCMAudioPlayer")
         self.stream.close()
@@ -83,11 +80,16 @@ def createBot(commandPrefix) -> commands.Bot:
             logger.info("No subprocesses to shutdown")
             return
 
-        logger.info("Shutting down subprocesses...")
+        logger.info(f"Shutting down {len(subprocesses)} subprocesses...")
 
         for process in subprocesses:
-            process.kill()
-            await process.communicate()
+            try:
+                process.kill()
+            except Exception as e:
+                logger.info(f"Skipping subprocess kill because an exception was raised: {e}")
+                pass
+
+        subprocesses.clear()
         
         logger.info("All subprocesses shutdown.")
 
@@ -151,7 +153,7 @@ def createBot(commandPrefix) -> commands.Bot:
                 return
 
         try:
-            audioPlayer = PCMAudioPlayer(8000)
+            audioPlayer = PCMAudioPlayer()
         except Exception as e:
             logger.error(f"Failed to start PCMAudioPlayer: {e}")
 
@@ -204,7 +206,7 @@ def createBot(commandPrefix) -> commands.Bot:
             program.stdin.write(line)
 
         try:
-            audioPlayer = PCMAudioPlayer(44100)
+            audioPlayer = PCMAudioPlayer()
         except Exception as e:
             logger.error(f"Failed to start PCMAudioPlayer: {e}")
 
@@ -212,7 +214,7 @@ def createBot(commandPrefix) -> commands.Bot:
             await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
             return
 
-        ctx.voice_client.play(audioPlayer, after=lambda e: print(f'Player error: {e}') if e else None)
+        ctx.voice_client.play(audioPlayer, after = lambda e: logger.error(f'Player error: {e}') if e else None)
 
         await message.edit(content = ":white_check_mark: Streaming OKWIN.")
 
@@ -234,7 +236,11 @@ def createBot(commandPrefix) -> commands.Bot:
         if ctx.voice_client is not None:
             await disconnect(ctx.voice_client)
 
-        await ctx.author.voice.channel.connect()
+        try:
+            await ctx.author.voice.channel.connect()
+        except Exception as e:
+            await ctx.send(":broken_heart: Failed to connect to voice.")
+            raise commands.CommandError(f"Failed to connect to voice channel: {e}.")
 
         logger.info(f"connected with args {args}")
 
@@ -248,6 +254,7 @@ def createBot(commandPrefix) -> commands.Bot:
 
     @bot.command(name="stop", help="Disconnect bot")
     async def stop(ctx):
+        await ctx.message.add_reaction("wave")
         await disconnect(ctx.voice_client)
 
     @bot.event
@@ -264,7 +271,7 @@ def createBot(commandPrefix) -> commands.Bot:
                 if client.channel.id == before.channel.id:
                     await disconnect(client)
 
-    async disconnect(client)
+    async def disconnect(client):
         await client.disconnect()
         await killSubprocesses()    
 
