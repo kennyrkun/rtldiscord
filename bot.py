@@ -267,8 +267,10 @@ def createBot(commandPrefix) -> commands.Bot:
 
         try:
             await ctx.author.voice.channel.connect()
+
+            if ctx.voice_client is not None:
+                raise commands.CommandError("Failed to connect to voice. ([Probably 4006](https://github.com/Rapptz/discord.py/pull/10210))")
         except Exception as e:
-            await ctx.send(":broken_heart: Failed to connect to voice.")
             raise commands.CommandError(f"Failed to connect to voice channel: {e}.")
 
         logger.info(f"connected with args {args}")
@@ -276,17 +278,21 @@ def createBot(commandPrefix) -> commands.Bot:
         await killSubprocesses()
 
         if len(args) == 1:
-            if args[0] == "okwin":
-                await startOP25(ctx, "okwin")
-                return
-            elif args[0] == "okc":
-                raise commands.CommandError("OKC system is not supported.")
             if args[0].isdigit():
                 if len(args[0]) != 9:
                     raise commands.CommandError("Frequency is out of range.")
 
+                raise commands.CommandError("Not yet, but soon!")
+
                 await startRTLFM(ctx, args[0])
                 return
+            else:
+                if args[0] == "okwin":
+                    await startOP25(ctx, "okwin")
+                    return
+                elif args[0] == "okc":
+                    await startOP25(ctx, "okc")
+                    return
 
         raise commands.CommandError("Invalid arguments.")
 
@@ -306,6 +312,10 @@ def createBot(commandPrefix) -> commands.Bot:
 
         await ctx.message.add_reaction("👋")
         await disconnect(ctx.voice_client)
+
+    @bot.command(name="restart", help="Restarts the bot")
+    async def restart(ctx):
+        exit()
 
     @bot.event
     async def on_voice_state_update(member, before, after):
