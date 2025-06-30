@@ -66,276 +66,273 @@ class PCMAudioPlayer(discord.AudioSource):
         logger.info("destroying PCMAudioPlayer")
         self.stream.close()
 
-def createBot(commandPrefix) -> commands.Bot:
-    intents = discord.Intents.default()
-    intents.message_content = True
+intents = discord.Intents.default()
+intents.message_content = True
 
-    bot = commands.Bot(
-        command_prefix = commandPrefix,
-        description = "SDR Audio Streamer and goofy lil guy!",
-        intents = intents
+bot = commands.Bot(
+    command_prefix = "!",
+    description = "SDR Audio Streamer and goofy lil guy!",
+    intents = intents
+)
+
+async def killSubprocesses():
+    global subprocesses
+
+    if len(subprocesses) == 0:
+        logger.info("No subprocesses to shutdown.")
+        return
+
+    logger.info(f"Shutting down {len(subprocesses)} subprocesses...")
+
+    for process in subprocesses:
+        try:
+            process.kill()
+        except Exception as e:
+            logger.info(f"Skipping subprocess kill because an exception was raised: {e}")
+            pass
+
+    subprocesses.clear()
+    
+    logger.info("All subprocesses shutdown.")
+
+    logger.info("Canceling running tasks...")
+
+    if len(tasks) == 0:
+        logger.info("No tasks to cancel.")
+        return
+
+    logger.info(f"Shutting down {len(tasks)} tasks...")
+
+    for task in tasks:
+        try:
+            task.cancel()
+        except Exception as e:
+            logger.info(f"Skipping task cancel because an exception was raised: {e}")
+            pass
+
+    tasks.clear()
+
+@bot.event
+async def on_ready():
+    logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+
+    await bot.change_presence(
+        activity = discord.Activity(
+            type = discord.ActivityType.listening,
+            name = "the airwaves",
+            url = "https://www.rtl-sdr.com/"
+        )
     )
 
-    async def killSubprocesses():
-        global subprocesses
+async def startOP25(ctx, config):
+    message = await ctx.send(f":clock12: Starting OP25 for {config}...")
 
-        if len(subprocesses) == 0:
-            logger.info("No subprocesses to shutdown.")
-            return
+    sdrProcess = await asyncio.create_subprocess_exec(
+        "/home/sdr/op25/op25/gr-op25_repeater/apps/rx.py",
+            "--trunk-conf-file", f"{config}.tsv",
+            "--freq-error-tracking",
+            "--nocrypt",
+            "--vocoder",
+            "--phase2-tdma",
+            "--args", "rtl",
+            "--gains", "lna:36",
+            "--sample-rate", "960000",
+            "--fine-tune", "500", # fine tune frequency offset
+            "--freq-corr", "0",
+            "--verbosity", "0",
+            "--demod-type", "cqpsk",
+            "--terminal-type", "http:192.168.0.9:8080",
+            "--udp-player",
+            "--audio-output", "hw:2,1",
+        stdout = asyncio.subprocess.PIPE,
+        stderr = asyncio.subprocess.STDOUT,
+        cwd = "/home/sdr/op25/op25/gr-op25_repeater/apps/"
+    )
 
-        logger.info(f"Shutting down {len(subprocesses)} subprocesses...")
+    subprocesses.append(sdrProcess)
 
-        for process in subprocesses:
-            try:
-                process.kill()
-            except Exception as e:
-                logger.info(f"Skipping subprocess kill because an exception was raised: {e}")
-                pass
+    await message.edit(content = ":clock1: Waiting for ALSA...")
 
-        subprocesses.clear()
-        
-        logger.info("All subprocesses shutdown.")
+    while sdrProcess.returncode is None:
+        line = await sdrProcess.stdout.readline()
 
-        logger.info("Canceling running tasks...")
+        if not line:
+            continue
 
-        if len(tasks) == 0:
-            logger.info("No tasks to cancel.")
-            return
+        line = line.decode()
+        logger.info(line)
 
-        logger.info(f"Shutting down {len(tasks)} tasks...")
-
-        for task in tasks:
-            try:
-                task.cancel()
-            except Exception as e:
-                logger.info(f"Skipping task cancel because an exception was raised: {e}")
-                pass
-
-        tasks.clear()
-
-    @bot.event
-    async def on_ready():
-        logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
-
-        await bot.change_presence(
-            activity = discord.Activity(
-                type = discord.ActivityType.listening,
-                name = "the airwaves",
-                url = "https://www.rtl-sdr.com/"
-            )
-        )
-
-    async def startOP25(ctx, config):
-        message = await ctx.send(f":clock12: Starting OP25 for {config}...")
-
-        sdrProcess = await asyncio.create_subprocess_exec(
-            "/home/sdr/op25/op25/gr-op25_repeater/apps/rx.py",
-                "--trunk-conf-file", f"{config}.tsv",
-                "--freq-error-tracking",
-                "--nocrypt",
-                "--vocoder",
-                "--phase2-tdma",
-                "--args", "rtl",
-                "--gains", "lna:36",
-                "--sample-rate", "960000",
-                "--fine-tune", "500", # fine tune frequency offset
-                "--freq-corr", "0",
-                "--verbosity", "0",
-                "--demod-type", "cqpsk",
-                "--terminal-type", "http:192.168.0.9:8080",
-                "--udp-player",
-                "--audio-output", "hw:2,1",
-            stdout = asyncio.subprocess.PIPE,
-            stderr = asyncio.subprocess.STDOUT,
-            cwd = "/home/sdr/op25/op25/gr-op25_repeater/apps/"
-        )
-
-        subprocesses.append(sdrProcess)
-
-        await message.edit(content = ":clock1: Waiting for ALSA...")
-
-        while sdrProcess.returncode is None:
-            line = await sdrProcess.stdout.readline()
-
-            if not line:
-                continue
-
-            line = line.decode()
-            logger.info(line)
-
-            if line.find("using ALSA sound system") != -1:
-                await message.edit(content = ":clock2: ALSA is ready, starting stream...")
-                await asyncio.sleep(3)
-                break
-            elif line.find("Traceback (most recent call last):") != -1:
-                await message.edit(content = ":broken_heart: OP25 encountered a fatal error.")
-                await disconnect(ctx.voice_client)
-                await killSubprocesses()
-                return
-
-        try:
-            audioPlayer = PCMAudioPlayer()
-        except Exception as e:
-            logger.error(f"Failed to start PCMAudioPlayer: {e}")
-
+        if line.find("using ALSA sound system") != -1:
+            await message.edit(content = ":clock2: ALSA is ready, starting stream...")
+            await asyncio.sleep(3)
+            break
+        elif line.find("Traceback (most recent call last):") != -1:
+            await message.edit(content = ":broken_heart: OP25 encountered a fatal error.")
             await disconnect(ctx.voice_client)
-            await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
+            await killSubprocesses()
             return
 
-        ctx.voice_client.play(audioPlayer, after=lambda e: print(f'Player error: {e}') if e else None)
+    try:
+        audioPlayer = PCMAudioPlayer()
+    except Exception as e:
+        logger.error(f"Failed to start PCMAudioPlayer: {e}")
 
-        await message.edit(content = f":white_check_mark: Streaming {config}.")
+        await disconnect(ctx.voice_client)
+        await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
+        return
 
-        await bot.change_presence(activity = 
-            discord.Streaming(
-                name = config,
-                url = "https://github.com/boatbod/op25"
-            )
+    ctx.voice_client.play(audioPlayer, after=lambda e: print(f'Player error: {e}') if e else None)
+
+    await message.edit(content = f":white_check_mark: Streaming {config}.")
+
+    await bot.change_presence(activity = 
+        discord.Streaming(
+            name = config,
+            url = "https://github.com/boatbod/op25"
         )
+    )
 
-    async def runRTLFM(sdrProcess, aplayProcess):
-        logger.info("Starting RTLFM loop.")
+async def runRTLFM(sdrProcess, aplayProcess):
+    logger.info("Starting RTLFM loop.")
 
-        # loop should automatically exit when the tasks are killed?
-        while sdrProcess.returncode is None and aplayProcess.returncode is None:
-            line = await sdrProcess.stdout.read(1024)
-            aplayProcess.stdin.write(line)
+    # loop should automatically exit when the tasks are killed?
+    while sdrProcess.returncode is None and aplayProcess.returncode is None:
+        line = await sdrProcess.stdout.read(1024)
+        aplayProcess.stdin.write(line)
 
-        logger.info("Ended RTLFM loop.")
+    logger.info("Ended RTLFM loop.")
 
-    async def startRTLFM(ctx, freq):
-        message = await ctx.send(f":clock12: Starting RTLFM...")
+async def startRTLFM(ctx, freq):
+    message = await ctx.send(f":clock12: Starting RTLFM...")
 
-        sdrProcess = await asyncio.create_subprocess_exec(
-            "rtl_fm",
-                "-f", "467612500",
-                "-s", "44100",
-                "-g", "9",
-                "-l", "10",
-                "-",
-            stdout = asyncio.subprocess.PIPE,
-            stderr = asyncio.subprocess.STDOUT
+    sdrProcess = await asyncio.create_subprocess_exec(
+        "rtl_fm",
+            "-f", "467612500",
+            "-s", "44100",
+            "-g", "9",
+            "-l", "10",
+            "-",
+        stdout = asyncio.subprocess.PIPE,
+        stderr = asyncio.subprocess.STDOUT
+    )
+
+    aplayProcess = await asyncio.create_subprocess_exec(
+        "aplay",
+            "-t", "raw",
+            "-r", "44100",
+            "-c", "1",
+            "-f", "S16_LE",
+            "-D", "hw:2,1",
+        stdout = asyncio.subprocess.PIPE,
+        stderr = asyncio.subprocess.STDOUT,
+        stdin  = asyncio.subprocess.PIPE
+    )
+
+    subprocesses.append(sdrProcess)
+    subprocesses.append(aplayProcess)
+
+    asyncio.create_task(runRTLFM(sdrProcess, aplayProcess))
+
+    try:
+        audioPlayer = PCMAudioPlayer()
+    except Exception as e:
+        logger.error(f"Failed to start PCMAudioPlayer: {e}")
+
+        await disconnect(ctx.voice_client)
+        await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
+        return
+
+    ctx.voice_client.play(audioPlayer, after = lambda e: logger.error(f'Player error: {e}') if e else None)
+
+    await message.edit(content = f":white_check_mark: Streaming FM {freq}.")
+
+    await bot.change_presence(activity = 
+        discord.Streaming(
+            name = freq,
+            url = "https://manpages.ubuntu.com/manpages/trusty/man1/rtl_fm.1.html"
         )
+    )
 
-        aplayProcess = await asyncio.create_subprocess_exec(
-            "aplay",
-                "-t", "raw",
-                "-r", "44100",
-                "-c", "1",
-                "-f", "S16_LE",
-                "-D", "hw:2,1",
-            stdout = asyncio.subprocess.PIPE,
-            stderr = asyncio.subprocess.STDOUT,
-            stdin  = asyncio.subprocess.PIPE
-        )
+@bot.command(name="play", help="Play audio")
+async def play(ctx, *args):
+    logger.info("play command")
 
-        subprocesses.append(sdrProcess)
-        subprocesses.append(aplayProcess)
+    if ctx.author.voice is None:
+        await ctx.send("You must be connected a voice channel.")
+        raise commands.CommandError("Author not connected to a voice channel.")
 
-        asyncio.create_task(runRTLFM(sdrProcess, aplayProcess))
+    if ctx.voice_client is not None:
+        await disconnect(ctx.voice_client)
 
-        try:
-            audioPlayer = PCMAudioPlayer()
-        except Exception as e:
-            logger.error(f"Failed to start PCMAudioPlayer: {e}")
-
-            await disconnect(ctx.voice_client)
-            await message.edit(content = ":broken_heart: Failed to start PCMAudioPlayer.")
-            return
-
-        ctx.voice_client.play(audioPlayer, after = lambda e: logger.error(f'Player error: {e}') if e else None)
-
-        await message.edit(content = f":white_check_mark: Streaming FM {freq}.")
-
-        await bot.change_presence(activity = 
-            discord.Streaming(
-                name = freq,
-                url = "https://manpages.ubuntu.com/manpages/trusty/man1/rtl_fm.1.html"
-            )
-        )
-
-    @bot.command(name="play", help="Play audio")
-    async def play(ctx, *args):
-        logger.info("play command")
-
-        if ctx.author.voice is None:
-            await ctx.send("You must be connected a voice channel.")
-            raise commands.CommandError("Author not connected to a voice channel.")
+    try:
+        await ctx.author.voice.channel.connect()
 
         if ctx.voice_client is not None:
-            await disconnect(ctx.voice_client)
+            raise commands.CommandError("Failed to connect to voice. ([Probably 4006](https://github.com/Rapptz/discord.py/pull/10210))")
+    except Exception as e:
+        raise commands.CommandError(f"Failed to connect to voice channel: {e}.")
 
-        try:
-            await ctx.author.voice.channel.connect()
+    logger.info(f"connected with args {args}")
 
-            if ctx.voice_client is not None:
-                raise commands.CommandError("Failed to connect to voice. ([Probably 4006](https://github.com/Rapptz/discord.py/pull/10210))")
-        except Exception as e:
-            raise commands.CommandError(f"Failed to connect to voice channel: {e}.")
+    await killSubprocesses()
 
-        logger.info(f"connected with args {args}")
+    if len(args) == 1:
+        if args[0].isdigit():
+            if len(args[0]) != 9:
+                raise commands.CommandError("Frequency is out of range.")
 
-        await killSubprocesses()
+            raise commands.CommandError("Not yet, but soon!")
 
-        if len(args) == 1:
-            if args[0].isdigit():
-                if len(args[0]) != 9:
-                    raise commands.CommandError("Frequency is out of range.")
-
-                raise commands.CommandError("Not yet, but soon!")
-
-                await startRTLFM(ctx, args[0])
+            await startRTLFM(ctx, args[0])
+            return
+        else:
+            if args[0] == "okwin":
+                await startOP25(ctx, "okwin")
                 return
-            else:
-                if args[0] == "okwin":
-                    await startOP25(ctx, "okwin")
-                    return
-                elif args[0] == "okc":
-                    await startOP25(ctx, "okc")
-                    return
+            elif args[0] == "okc":
+                await startOP25(ctx, "okc")
+                return
 
-        raise commands.CommandError("Invalid arguments.")
+    raise commands.CommandError("Invalid arguments.")
 
-    @bot.event
-    async def on_command_error(ctx, error):
-        await disconnect(ctx.voice_client)
-        await ctx.send(f"💔 {error}")
-        logger.error(f"Error in command: {error}")
+@bot.event
+async def on_command_error(ctx, error):
+    await disconnect(ctx.voice_client)
+    await ctx.send(f"💔 {error}")
+    logger.error(f"Error in command: {error}")
 
-    @bot.command(name="stop", help="Disconnect bot")
-    async def stop(ctx):
-        if ctx.voice_client is None:
-            await ctx.message.add_reaction("🧐")
-            return
+@bot.command(name="stop", help="Disconnect bot")
+async def stop(ctx):
+    if ctx.voice_client is None:
+        await ctx.message.add_reaction("🧐")
+        return
 
-        logger.info(f"{ctx.voice_client}")
+    logger.info(f"{ctx.voice_client}")
 
-        await ctx.message.add_reaction("👋")
-        await disconnect(ctx.voice_client)
+    await ctx.message.add_reaction("👋")
+    await disconnect(ctx.voice_client)
 
-    @bot.command(name="restart", help="Restarts the bot")
-    async def restart(ctx):
-        exit()
+@bot.command(name="restart", help="Restarts the bot")
+async def restart(ctx):
+    exit()
 
-    @bot.event
-    async def on_voice_state_update(member, before, after):
-        if before.channel is None:
-            return
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if before.channel is None:
+        return
 
-        if member.id == bot.user.id:
-            return
+    if member.id == bot.user.id:
+        return
 
-        # leave the channel if it becomes empty
-        if len(before.channel.members) - 1 < 1:
-            for client in bot.voice_clients:
-                if client.channel.id == before.channel.id:
-                    await disconnect(client)
+    # leave the channel if it becomes empty
+    if len(before.channel.members) - 1 < 1:
+        for client in bot.voice_clients:
+            if client.channel.id == before.channel.id:
+                await disconnect(client)
 
-    async def disconnect(client):
-        await client.disconnect()
-        await killSubprocesses()    
-
-    return bot
+async def disconnect(client):
+    await client.disconnect()
+    await killSubprocesses()    
 
 #discord.opus.load_opus("/opt/homebrew/lib/libopus.dylib")
 #if not discord.opus.is_loaded():
@@ -351,4 +348,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # start bot
-    createBot("!").run(token)
+bot.run(token)
