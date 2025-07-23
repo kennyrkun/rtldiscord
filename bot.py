@@ -7,8 +7,7 @@ import subprocess
 import asyncio
 import logging
 
-logging.basicConfig(level=logging.INFO)
-logger      = logging.getLogger(__name__)
+logger = logging.getLogger("discord")
 
 from discord.ext import commands
 
@@ -114,7 +113,7 @@ async def killSubprocesses():
 
 @bot.event
 async def on_ready():
-    logger.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    logger.info(f'Logged in as {bot.user}, ID: {bot.user.id}, discord.py version: {discord.__version__}')
 
     await bot.change_presence(
         activity = discord.Activity(
@@ -192,7 +191,7 @@ async def startOP25(ctx, config):
         )
     )
 
-async def runRTLFM(sdrProcess, aplayProcess):
+async def rtlfmAudioProcessingLoop(sdrProcess, aplayProcess):
     logger.info("Starting RTLFM loop.")
 
     # loop should automatically exit when the tasks are killed?
@@ -231,7 +230,7 @@ async def startRTLFM(ctx, freq):
     subprocesses.append(sdrProcess)
     subprocesses.append(aplayProcess)
 
-    asyncio.create_task(runRTLFM(sdrProcess, aplayProcess))
+    asyncio.create_task(rtlfmAudioProcessingLoop(sdrProcess, aplayProcess))
 
     try:
         audioPlayer = PCMAudioPlayer()
@@ -267,8 +266,8 @@ async def play(ctx, *args):
     try:
         await ctx.author.voice.channel.connect()
 
-        if ctx.voice_client is not None:
-            raise commands.CommandError("Failed to connect to voice. ([Probably 4006](https://github.com/Rapptz/discord.py/pull/10210))")
+        if ctx.voice_client is None:
+            raise commands.CommandError("[Probably 4006](https://github.com/Rapptz/discord.py/pull/10210)? :pensive:")
     except Exception as e:
         raise commands.CommandError(f"Failed to connect to voice channel: {e}.")
 
@@ -328,6 +327,7 @@ async def on_voice_state_update(member, before, after):
     if len(before.channel.members) - 1 < 1:
         for client in bot.voice_clients:
             if client.channel.id == before.channel.id:
+                logger.info("Channel has become empty, leaving.")
                 await disconnect(client)
 
 async def disconnect(client):
@@ -347,5 +347,4 @@ if __name__ == "__main__":
         input("Press Enter to exit")
         sys.exit(1)
 
-    # start bot
 bot.run(token)
