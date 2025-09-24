@@ -7,6 +7,7 @@ Debian based system.
   - python3
   - python3-pip
   - python3-pyaudio
+  - gnuradio
 
 ## Python Packages 
   - samplerate
