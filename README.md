@@ -10,5 +10,5 @@ Debian based system.
 
 ## Python Packages 
   - samplerate
-  - discord.py
+  - discord.py[voice]
   - numpy
