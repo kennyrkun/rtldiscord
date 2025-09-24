@@ -12,3 +12,6 @@ Debian based system.
   - samplerate
   - discord.py[voice]
   - numpy
+
+# Setup
+Create a loopback device using `sudo modeprobe snd-aloop`. Use the device # in the script.
