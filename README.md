@@ -15,4 +15,5 @@ Debian based system.
   - numpy
 
 # Setup
-Create a loopback device using `sudo modeprobe snd-aloop`. Use the device # in the script.
+1. Install boatbod/op25 from source.
+2. Create a loopback device using `sudo modeprobe snd-aloop`. Use the device # in the script.
